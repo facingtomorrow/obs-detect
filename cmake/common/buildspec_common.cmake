@@ -61,33 +61,59 @@ function(_setup_obs_studio)
     set(_is_fresh --fresh)
   endif()
 
+  set(_cmake_args)
+
   if(OS_WINDOWS)
-    set(_cmake_generator "${CMAKE_GENERATOR}")
-    set(_cmake_arch "-A ${arch}")
-    set(_cmake_extra "-DCMAKE_SYSTEM_VERSION=${CMAKE_SYSTEM_VERSION} -DCMAKE_ENABLE_SCRIPTING=OFF")
+    set(_cmake_generator_args -G "${CMAKE_GENERATOR}" -A "${arch}")
+    list(APPEND _cmake_args -DCMAKE_SYSTEM_VERSION=${CMAKE_SYSTEM_VERSION}
+                            -DCMAKE_ENABLE_SCRIPTING=OFF)
+    set(_cmake_build_args --config Debug --parallel)
     set(_cmake_version "2.0.0")
   elseif(OS_MACOS)
-    set(_cmake_generator "Xcode")
-    set(_cmake_arch "-DCMAKE_OSX_ARCHITECTURES:STRING='arm64;x86_64'")
-    set(_cmake_extra "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    set(_cmake_generator_args -G Xcode)
+    string(REPLACE ";" "\\;" _cmake_osx_architectures "arm64;x86_64")
+    string(REPLACE ";" "\\;" _cmake_prefix_path "${CMAKE_PREFIX_PATH}")
+
+    if(CMAKE_OSX_SYSROOT)
+      set(_cmake_osx_sysroot "${CMAKE_OSX_SYSROOT}")
+    else()
+      execute_process(
+        COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE _cmake_osx_sysroot
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+
+    list(
+      APPEND
+      _cmake_args
+      -DCMAKE_OSX_ARCHITECTURES:STRING=${_cmake_osx_architectures}
+      -DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=${CMAKE_OSX_DEPLOYMENT_TARGET}
+      -DCMAKE_OSX_SYSROOT:PATH=${_cmake_osx_sysroot}
+      -DCMAKE_PREFIX_PATH:PATH=${_cmake_prefix_path})
+    set(_cmake_build_args --config Debug --parallel -- ONLY_ACTIVE_ARCH=NO -arch arm64 -arch x86_64)
     set(_cmake_version "3.0.0")
+  endif()
+
+  if(NOT OS_MACOS)
+    string(REPLACE ";" "\\;" _cmake_prefix_path "${CMAKE_PREFIX_PATH}")
+    list(APPEND _cmake_args -DCMAKE_PREFIX_PATH:PATH=${_cmake_prefix_path})
   endif()
 
   message(STATUS "Configure ${label} (${arch})")
   execute_process(
     COMMAND
       "${CMAKE_COMMAND}" -S "${dependencies_dir}/${_obs_destination}" -B
-      "${dependencies_dir}/${_obs_destination}/build_${arch}" -G ${_cmake_generator} "${_cmake_arch}"
+      "${dependencies_dir}/${_obs_destination}/build_${arch}" ${_cmake_generator_args}
       -DOBS_CMAKE_VERSION:STRING=${_cmake_version} -DENABLE_PLUGINS:BOOL=OFF -DENABLE_UI:BOOL=OFF
-      -DOBS_VERSION_OVERRIDE:STRING=${_obs_version} "-DCMAKE_PREFIX_PATH='${CMAKE_PREFIX_PATH}'" ${_is_fresh}
-      ${_cmake_extra}
+      -DOBS_VERSION_OVERRIDE:STRING=${_obs_version} ${_is_fresh} ${_cmake_args}
     RESULT_VARIABLE _process_result COMMAND_ERROR_IS_FATAL ANY
     OUTPUT_QUIET)
   message(STATUS "Configure ${label} (${arch}) - done")
 
   message(STATUS "Build ${label} (${arch})")
   execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target obs-frontend-api --config Debug --parallel
+    COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target obs-frontend-api ${_cmake_build_args}
     WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
     RESULT_VARIABLE _process_result COMMAND_ERROR_IS_FATAL ANY
     OUTPUT_QUIET)

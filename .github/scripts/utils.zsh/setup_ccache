@@ -1,5 +1,13 @@
 autoload -Uz log_debug log_warning
 
+set_ccache_config() {
+  local config_value="$1"
+
+  if ! ccache --set-config="${config_value}"; then
+    log_warning "Skipping unsupported ccache option: ${config_value}"
+  fi
+}
+
 if (( ! ${+project_root} )) {
   log_error "'project_root' not set. Please set before running ${0}."
   return 2
@@ -10,11 +18,11 @@ if (( ${+commands[ccache]} )) {
 
   typeset -gx CCACHE_CONFIGPATH="${project_root}/.ccache.conf"
 
-  ccache --set-config=run_second_cpp=true
-  ccache --set-config=direct_mode=true
-  ccache --set-config=inode_cache=true
-  ccache --set-config=compiler_check=content
-  ccache --set-config=file_clone=true
+  set_ccache_config run_second_cpp=true
+  set_ccache_config direct_mode=true
+  set_ccache_config inode_cache=true
+  set_ccache_config compiler_check=content
+  set_ccache_config file_clone=true
 
   local -a sloppiness=(
     include_file_mtime
@@ -29,12 +37,12 @@ if (( ${+commands[ccache]} )) {
       clang_index_store
     )
 
-    ccache --set-config=sloppiness=${(j:,:)sloppiness}
+    set_ccache_config sloppiness=${(j:,:)sloppiness}
   }
 
   if (( ${+CI} )) {
-    ccache --set-config=cache_dir="${GITHUB_WORKSPACE:-${HOME}}/.ccache"
-    ccache --set-config=max_size="${CCACHE_SIZE:-1G}"
+    set_ccache_config cache_dir="${GITHUB_WORKSPACE:-${HOME}}/.ccache"
+    set_ccache_config max_size="${CCACHE_SIZE:-1G}"
     ccache -z > /dev/null
   }
 } else {
