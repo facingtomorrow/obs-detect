@@ -9,6 +9,7 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
 #include <numeric>
 #include <memory>
 #include <exception>
@@ -33,6 +34,51 @@
 #define FACE_DETECT_MODEL_SIZE "!!!FACE_DETECT!!!"
 
 struct detect_filter : public filter_data {};
+
+static cv::Rect2f clamp_tracking_rect_to_frame(cv::Rect2f rect, float width, float height)
+{
+	rect.width = std::min(rect.width, width);
+	rect.height = std::min(rect.height, height);
+	rect.x = std::clamp(rect.x, 0.0f, width - rect.width);
+	rect.y = std::clamp(rect.y, 0.0f, height - rect.height);
+	return rect;
+}
+
+static void sync_tracking_filter(struct detect_filter *tf)
+{
+	if (!tf || !tf->source) {
+		return;
+	}
+
+	obs_source_t *parent = obs_filter_get_parent(tf->source);
+	if (!parent) {
+		if (!tf->trackingEnabled) {
+			tf->trackingFilter = nullptr;
+		}
+		return;
+	}
+
+	obs_source_t *crop_pad_filter = obs_source_get_filter_by_name(parent, "Detect Tracking");
+
+	if (tf->trackingEnabled) {
+		if (!crop_pad_filter) {
+			obs_log(LOG_DEBUG, "Tracking enabled");
+			crop_pad_filter =
+				obs_source_create("crop_filter", "Detect Tracking", nullptr, nullptr);
+			if (crop_pad_filter) {
+				obs_source_filter_add(parent, crop_pad_filter);
+			}
+		}
+		tf->trackingFilter = crop_pad_filter;
+	} else {
+		if (crop_pad_filter) {
+			obs_log(LOG_DEBUG, "Tracking disabled");
+			obs_source_filter_remove(parent, crop_pad_filter);
+		}
+		tf->trackingFilter = nullptr;
+		tf->trackingRect = cv::Rect2f();
+	}
+}
 
 const char *detect_filter_getname(void *unused)
 {
@@ -233,7 +279,9 @@ obs_properties_t *detect_filter_properties(void *data)
 							      obs_property_t *,
 							      obs_data_t *settings) {
 		const bool enabled = obs_data_get_bool(settings, "tracking_group");
-		for (auto prop_name : {"zoom_factor", "zoom_object", "zoom_speed_factor"}) {
+		for (auto prop_name : {"zoom_factor", "zoom_object", "zoom_speed_factor",
+				      "keep_tracking_in_frame", "zoom_factor_extended_info",
+				      "zoom_speed_extended_info"}) {
 			obs_property_t *prop = obs_properties_get(props_, prop_name);
 			obs_property_set_visible(prop, enabled);
 		}
@@ -242,10 +290,18 @@ obs_properties_t *detect_filter_properties(void *data)
 
 	// add zoom factor slider
 	obs_properties_add_float_slider(tracking_group_props, "zoom_factor",
-					obs_module_text("ZoomFactor"), 0.0, 1.0, 0.05);
+				      obs_module_text("ZoomFactor"), 0.0, 1.2, 0.05);
+	obs_property_t *zoom_factor_extended_info = obs_properties_add_text(
+		tracking_group_props, "zoom_factor_extended_info",
+		obs_module_text("ZoomExtendedWarning"), OBS_TEXT_INFO);
+	obs_property_text_set_info_type(zoom_factor_extended_info, OBS_TEXT_INFO_WARNING);
+	obs_property_text_set_info_word_wrap(zoom_factor_extended_info, true);
 
 	obs_properties_add_float_slider(tracking_group_props, "zoom_speed_factor",
-					obs_module_text("ZoomSpeed"), 0.0, 0.1, 0.01);
+				      obs_module_text("ZoomSpeed"), 0.0, 1.0, 0.01);
+
+	obs_properties_add_bool(tracking_group_props, "keep_tracking_in_frame",
+				obs_module_text("KeepTrackingInFrame"));
 
 	// add object selection for zoom drop down: "Single", "All"
 	obs_property_t *zoom_object = obs_properties_add_list(tracking_group_props, "zoom_object",
@@ -442,6 +498,7 @@ void detect_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "masking_blur_radius", 0);
 	obs_data_set_default_int(settings, "dilation_iterations", 0);
 	obs_data_set_default_bool(settings, "tracking_group", false);
+	obs_data_set_default_bool(settings, "keep_tracking_in_frame", true);
 	obs_data_set_default_double(settings, "zoom_factor", 0.0);
 	obs_data_set_default_double(settings, "zoom_speed_factor", 0.05);
 	obs_data_set_default_string(settings, "zoom_object", "single");
@@ -470,6 +527,7 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->maskingBlurRadius = (int)obs_data_get_int(settings, "masking_blur_radius");
 	tf->maskingDilateIterations = (int)obs_data_get_int(settings, "dilation_iterations");
 	bool newTrackingEnabled = obs_data_get_bool(settings, "tracking_group");
+	tf->keepTrackingInFrame = obs_data_get_bool(settings, "keep_tracking_in_frame");
 	tf->zoomFactor = (float)obs_data_get_double(settings, "zoom_factor");
 	tf->zoomSpeedFactor = (float)obs_data_get_double(settings, "zoom_speed_factor");
 	tf->zoomObject = obs_data_get_string(settings, "zoom_object");
@@ -487,40 +545,12 @@ void detect_filter_update(void *data, obs_data_t *settings)
 	tf->crop_bottom = (int)obs_data_get_int(settings, "crop_bottom");
 	tf->minAreaThreshold = (int)obs_data_get_int(settings, "min_size_threshold");
 
-	// check if tracking state has changed
-	if (tf->trackingEnabled != newTrackingEnabled) {
-		tf->trackingEnabled = newTrackingEnabled;
-		obs_source_t *parent = obs_filter_get_parent(tf->source);
-		if (!parent) {
-			obs_log(LOG_ERROR, "Parent source not found");
-			return;
-		}
-		if (tf->trackingEnabled) {
-			obs_log(LOG_DEBUG, "Tracking enabled");
-			// get the parent of the source
-			// check if it has a crop/pad filter
-			obs_source_t *crop_pad_filter =
-				obs_source_get_filter_by_name(parent, "Detect Tracking");
-			if (!crop_pad_filter) {
-				// create a crop-pad filter
-				crop_pad_filter = obs_source_create(
-					"crop_filter", "Detect Tracking", nullptr, nullptr);
-				// add a crop/pad filter to the source
-				// set the parent of the crop/pad filter to the parent of the source
-				obs_source_filter_add(parent, crop_pad_filter);
-			}
-			tf->trackingFilter = crop_pad_filter;
-		} else {
-			obs_log(LOG_DEBUG, "Tracking disabled");
-			// remove the crop/pad filter
-			obs_source_t *crop_pad_filter =
-				obs_source_get_filter_by_name(parent, "Detect Tracking");
-			if (crop_pad_filter) {
-				obs_source_filter_remove(parent, crop_pad_filter);
-			}
-			tf->trackingFilter = nullptr;
-		}
+	const bool tracking_state_changed = tf->trackingEnabled != newTrackingEnabled;
+	tf->trackingEnabled = newTrackingEnabled;
+	if (tracking_state_changed && !tf->trackingEnabled) {
+		tf->trackingRect = cv::Rect2f();
 	}
+	sync_tracking_filter(tf);
 
 	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
@@ -690,6 +720,8 @@ void detect_filter_update(void *data, obs_data_t *settings)
 			obs_data_get_double(settings, "zoom_factor"));
 		obs_log(LOG_INFO, "  Zoom Object: %s",
 			obs_data_get_string(settings, "zoom_object"));
+		obs_log(LOG_INFO, "  Keep Camera Feed In Frame: %s",
+			 tf->keepTrackingInFrame ? "true" : "false");
 		obs_log(LOG_INFO, "  Disabled: %s", tf->isDisabled ? "true" : "false");
 #ifdef _WIN32
 		obs_log(LOG_INFO, "  Model file path: %ls", tf->modelFilepath.c_str());
@@ -706,6 +738,7 @@ void detect_filter_activate(void *data)
 {
 	obs_log(LOG_INFO, "Detect filter activated");
 	struct detect_filter *tf = reinterpret_cast<detect_filter *>(data);
+	sync_tracking_filter(tf);
 	tf->isDisabled = false;
 }
 
@@ -722,7 +755,7 @@ void *detect_filter_create(obs_data_t *settings, obs_source_t *source)
 {
 	obs_log(LOG_INFO, "Detect filter created");
 	void *data = bmalloc(sizeof(struct detect_filter));
-	struct detect_filter *tf = new (data) detect_filter();
+	struct detect_filter *tf = new (data) detect_filter{};
 
 	tf->source = source;
 	tf->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
@@ -1026,6 +1059,11 @@ void detect_filter_video_tick(void *data, float seconds)
 				tf->trackingRect.width + factor * (zw - tf->trackingRect.width);
 			tf->trackingRect.height =
 				tf->trackingRect.height + factor * (zh - tf->trackingRect.height);
+		}
+
+		if (tf->keepTrackingInFrame) {
+			tf->trackingRect = clamp_tracking_rect_to_frame(tf->trackingRect,
+								(float)width, (float)height);
 		}
 
 		// get the settings of the crop/pad filter

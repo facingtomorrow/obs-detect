@@ -25,6 +25,7 @@ struct filter_data {
 	int maskingBlurRadius;
 	int maskingDilateIterations;
 	bool trackingEnabled;
+	bool keepTrackingInFrame;
 	float zoomFactor;
 	float zoomSpeedFactor;
 	std::string zoomObject;

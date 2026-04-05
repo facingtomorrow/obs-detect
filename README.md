@@ -1,4 +1,3 @@
-# ⚠️ Stalled ⚠️ This project is not under active development
 
 ## OBS Detect - Object Detection and Masking Filter
 
@@ -13,6 +12,19 @@
 </div>
 
 A plugin for [OBS Studio](https://obsproject.com/) that allows you to detect many types of objects in any source, track them and apply masking.
+
+## Update (0.0.4)
+
+Recent updates in this fork:
+
+- Added `Keep Tracking Within Frame` toggle (ON by default), which keeps the framing inside the source bounds, so the layer below is not revealed at the edges.
+- Increased `Zoom Factor` to a maximum of `1.2` from `1.0` for more aggressive framing.
+- Increased `Zoom Speed` to a maximum of `1.0` from `0.1` for much faster/instant zoom and tracking.
+- Optimized startup so the detection and tracking don't need to be reset every time OBS starts.
+
+
+##
+
 
 If you like this work, which is given to you completely free of charge, please consider supporting it by sponsoring us on GitHub:
 
@@ -97,10 +109,22 @@ Note: The official [OBS plugins guide](https://obsproject.com/kb/plugins-guide) 
 
 ### Windows
 
-Use the CI scripts again, for example:
+Open PowerShell 7 in the repository root. The script will install CMake with `winget` if needed, but you still need Visual Studio 2022 or Visual Studio 2022 Build Tools available locally with the `Desktop development with C++` workload, the MSVC v143 toolset, and Windows SDK `10.0.20348.0` or newer.
+
+Use the CI script, for example:
 
 ```powershell
 > .github/scripts/Build-Windows.ps1 -Target x64
 ```
+
+If `cmake` was installed during the script run, restart PowerShell and run the command again. If you want to bypass the wrapper script, the equivalent CMake commands are:
+
+```powershell
+> cmake --preset windows-x64
+> cmake --build --preset windows-x64 --config RelWithDebInfo --parallel -- /consoleLoggerParameters:Summary /noLogo
+> cmake --install build_x64 --prefix ./release/RelWithDebInfo --config RelWithDebInfo
+```
+
+If the script reports that `Visual Studio 2022` could not be found, install `Microsoft.VisualStudio.2022.BuildTools` and include the C++ workload before rerunning the build.
 
 The build should exist in the `./release` folder off the root. You can manually install the files in the OBS directory.
